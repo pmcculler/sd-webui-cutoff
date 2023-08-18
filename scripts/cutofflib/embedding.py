@@ -124,11 +124,11 @@ def generate_prompts(
     
     result = CutoffPrompt(prompt, clip, targets, padding.token.replace('</w>', ''))
     
-    log(f'[Cutoff] replace: {", ".join(targets)}')
-    log(f'[Cutoff] to: {padding.token} ({padding.id})')
-    log(f'[Cutoff] original: {prompt}')
-    for i, (_, pp) in enumerate(result.generate()):
-        log(f'[Cutoff]       #{i}: {pp}')
+#    log(f'[Cutoff] replace: {", ".join(targets)}')
+#    log(f'[Cutoff] to: {padding.token} ({padding.id})')
+#    log(f'[Cutoff] original: {prompt}')
+#    for i, (_, pp) in enumerate(result.generate()):
+#        log(f'[Cutoff]       #{i}: {pp}')
     
     return result
 
