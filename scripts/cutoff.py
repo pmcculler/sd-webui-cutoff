@@ -6,6 +6,9 @@ import torch
 from torch import Tensor, nn
 import gradio as gr
 
+import re
+import time
+
 from modules.processing import StableDiffusionProcessing
 from modules import scripts
 
@@ -84,19 +87,19 @@ class Hook(SDHook):
         
         skip = False
         
-        def hook(mod: nn.Module, inputs: Tuple[List[str]], output: Tensor):
+        def hook(clip: nn.Module, inputs: Tuple[List[str]], output: Tensor):
             nonlocal skip
             
             if skip:
                 # called from <A> below
                 return
             
-            assert isinstance(mod, CLIP)
+            assert isinstance(clip, CLIP)
             
             prompts, *rest = inputs
             assert len(prompts) == output.shape[0]
             
-            # Check wether we are processing Negative prompt or not.
+            # Check whether we are processing Negative prompt or not.
             # I firmly believe there is no one who uses a negative prompt 
             # exactly identical to a prompt.
             if self.disable_neg:
@@ -106,48 +109,55 @@ class Hook(SDHook):
             
             output = output.clone()
             for pidx, prompt in enumerate(prompts):
-                tt = token_to_block(mod, prompt)
+                prompt_tokens = token_to_block(clip, prompt)
                 
-                cutoff = generate_prompts(mod, prompt, self.targets, self.padding)
+                cutoff = generate_prompts(clip, prompt, self.targets, self.padding)
                 switch_base = np.full_like(cutoff.sw, self.strong)
                 switch = np.full_like(cutoff.sw, True)
                 active = cutoff.active_blocks()
                 
                 prompt_to_tokens = defaultdict(lambda: [])
-                for tidx, (token, block_index) in enumerate(tt):
+                for token_idx, (token, block_index) in enumerate(prompt_tokens):
                     if block_index in active:
                         sw = switch.copy()
                         sw[block_index] = False
                         prompt = cutoff.text(sw)
                     else:
                         prompt = cutoff.text(switch_base)
-                    prompt_to_tokens[prompt].append((tidx, token))
+                    prompt_to_tokens[prompt].append((token_idx, token))
                 
                 #log(prompt_to_tokens)
                 
-                ks = list(prompt_to_tokens.keys())
-                if len(ks) == 0:
+                token_keys = list(prompt_to_tokens.keys())
+                if len(token_keys) == 0:
                     # without any (negative) prompts
-                    ks.append('')
+                    token_keys.append('')
                 
                 try:
                     # <A>
                     skip = True
-                    vs = mod(ks)
+                    vs = clip(token_keys)
                 finally:
                     skip = False
                 
                 tensor = output[pidx, :, :] # e.g. (77, 768)
-                for k, t in zip(ks, vs):
-                    assert tensor.shape == t.shape
-                    for tidx, token in prompt_to_tokens[k]:
-                        log(f'{tidx:03} {token.token:<16} {k}')
-                        tensor[tidx, :] = self.interpolate(tensor[tidx,:], t[tidx,:], self.weight)
-                
+                for token_key, t in zip(token_keys, vs):
+                    if tensor.shape == t.shape:
+                        #assert tensor.shape == t.shape
+                        for token_idx, token in prompt_to_tokens[token_key]:
+#                            log(f'{token_idx:03} {token.token:<16} {token_key}')
+                            tensor[token_idx, :] = self.interpolate(tensor[token_idx,:], t[token_idx,:], self.weight)
+                    else:
+                        log("Webui-cutoff-fork: Warning: tensor shape != t.shape, something is weird. Skipping iteration.")
+
             return output
         
         self.hook_layer(clip, hook)
     
+
+def _get_effective_prompt(prompts: list[str], prompt: str) -> str:
+    return prompts[0] if prompts else prompt
+
 
 class Script(scripts.Script):
     
@@ -161,9 +171,38 @@ class Script(scripts.Script):
     def show(self, is_img2img):
         return scripts.AlwaysVisible
     
+    def stripSugarFromAllPrompts(self, p):
+        if (p.all_prompts):
+            for i, prompt in enumerate(p.all_prompts):
+                p.all_prompts[i] = p.all_prompts[i].replace("&&", '')
+
+    # Extract tokens, remove sugar (&&foo&& -> foo)
+    def getTargetsFromPromptAndStripDelimiters(self, p):
+        original_prompt = _get_effective_prompt(p.all_prompts, p.prompt)
+        if "&&" in original_prompt:
+            targets = []
+            sections = re.split('(&&.*?&&)', p.prompt, flags=re.DOTALL)
+            for i, section in enumerate(sections):
+                if section.startswith('&&') and section.endswith('&&'):
+                    # This is a target word. Grab it.
+                    target = section[2:-2].strip()  # Remove the delimiters
+                    targets.append(target)
+                    # Effectively strips the delimiter from the prompt
+                    sections[i] = target
+            # Join the sections back together into the final prompt
+            prompt_out = ''.join(sections)
+            p.prompt = prompt_out
+            self.stripSugarFromAllPrompts(p)
+            return targets
+        else:
+            return []
+
+
     def ui(self, is_img2img):
-        with gr.Accordion(NAME, open=False):
+        with gr.Accordion(NAME + " -forked", open=False):
             enabled = gr.Checkbox(label='Enabled', value=False)
+            embedded_targets_enabled = gr.Checkbox(label='Use &embedded& targets, not target prompt box', value=False)
+
             targets = gr.Textbox(label='Target tokens (comma separated)', placeholder='red, blue')
             weight = gr.Slider(minimum=-1.0, maximum=2.0, step=0.01, value=0.5, label='Weight')
             with gr.Accordion('Details', open=False):
@@ -177,6 +216,7 @@ class Script(scripts.Script):
                 
         return [
             enabled,
+            embedded_targets_enabled,
             targets,
             weight,
             disable_neg,
@@ -190,6 +230,7 @@ class Script(scripts.Script):
         self,
         p: StableDiffusionProcessing,
         enabled: bool,
+        embedded_targets_enabled: bool,
         targets_: str,
         weight: Union[float,int],
         disable_neg: bool,
@@ -207,12 +248,55 @@ class Script(scripts.Script):
         if not enabled:
             return
         
-        if targets_ is None or len(targets_) == 0:
-            return
-        
-        targets = [x.strip() for x in targets_.split(',')]
-        targets = [x for x in targets if len(x) != 0]
-        
+        unique_colors = [
+            "Red", "Blue", "Yellow", "Green", "Black", "White", "Brown", "Orange",
+            "Purple", "Pink", "Gray", "Violet", "Maroon", "Gold", "Silver", "Beige",
+            "Cyan", "Magenta", "Turquoise", "Tan", "Olive", "Indigo", "Charcoal",
+            "Navy", "Teal", "Lime", "Lavender", "Peach", "Emerald", "Ruby", "Salmon",
+            "Plum", "Coral", "Fuchsia", "Amber", "Azure", "Rose", "Jade", "Lemon",
+            "Cream", "Pearl", "Chocolate", "Ivory", "Champagne", "Slate", "Mustard",
+            "Raspberry", "Burgundy", "Eggplant", "Aquamarine", "Crimson", "Imperial Yellow",
+            "Chartreuse", "Marigold", "Amethyst", "Lilac", "Garnet", "Topaz", "Periwinkle",
+            "Cobalt", "Orchid", "Citrine", "Vermilion", "Pewter", "Sienna", "Sapphire",
+            "Bronze", "Turmeric", "Steel", "Onyx", "Sand", "Mulberry", "Carnation",
+            "Jadeite", "Paprika", "Hibiscus", "Citron", "Tangerine", "Honeydew", "Caramel",
+            "Pomegranate", "Cinnamon", "Fern", "Butterscotch", "Petal", "Ochre", "Pistachio",
+            "Papaya", "Platinum", "Carnelian", "Eucalyptus", "Moonstone", "Mauve"
+        ]
+
+        #log("Webui-cutoff-fork: Searching for color words in prompts.")
+        start_time = time.time()
+
+        found_color_words = []
+        for color in unique_colors:
+            color_pattern = re.compile(re.escape(color), re.IGNORECASE | re.DOTALL)
+            for prompt in p.all_prompts:
+                matches = color_pattern.findall(prompt)
+                for matchingColorWord in matches:
+                    found_color_words.append(matchingColorWord)
+
+        end_time = time.time()
+
+        elapsed_time = end_time - start_time
+        log(f"Webui-cutoff-fork: Color word search time taken: {elapsed_time:.6f} seconds")
+
+        found_color_words = list(set(found_color_words))
+
+        if (embedded_targets_enabled):
+            targets = self.getTargetsFromPromptAndStripDelimiters(p)
+        else:
+            if targets_ is None or len(targets_) == 0:
+                targets = []
+            else:
+                targets = [x.strip() for x in targets_.split(',')]
+                targets = [x for x in targets if len(x) != 0]
+
+        for color in found_color_words:
+            if color in targets:
+                targets.remove(color)
+
+        targets = targets + found_color_words
+
         if len(targets) == 0:
             return
         
