@@ -2,7 +2,7 @@
 
 ## What is this?
 
-This is an extension for [stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) which limits the tokens' influence scope.
+This is an extension for [stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) which limits the scope of influence of words in the prompt.
 
 ## It is also a fork of webui-cutoff
 
