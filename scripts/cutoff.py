@@ -199,14 +199,15 @@ class Script(scripts.Script):
 
 
     def ui(self, is_img2img):
-        with gr.Accordion(NAME + " -forked", open=False):
+        with gr.Accordion(NAME + " in Prompt", open=False):
             enabled = gr.Checkbox(label='Enabled', value=False)
-            embedded_targets_enabled = gr.Checkbox(label='Use &embedded& targets, not target prompt box', value=False)
 
             targets = gr.Textbox(label='Target tokens (comma separated)', placeholder='red, blue')
             weight = gr.Slider(minimum=-1.0, maximum=2.0, step=0.01, value=0.5, label='Weight')
             with gr.Accordion('Details', open=False):
                 disable_neg = gr.Checkbox(value=True, label='Disable for Negative prompt.')
+                embedded_targets_disabled = gr.Checkbox(label='Disable &&--&& syntax in main prompt', value=False)
+                default_targets_disabled = gr.Checkbox(label='Do not include default targets', value=False)
                 strong = gr.Checkbox(value=False, label='Cutoff strongly.')
                 padding = gr.Textbox(label='Padding token (ID or single token)')
                 lerp = gr.Radio(choices=['Lerp', 'SLerp'], value='Lerp', label='Interpolation method')
@@ -216,7 +217,8 @@ class Script(scripts.Script):
                 
         return [
             enabled,
-            embedded_targets_enabled,
+            embedded_targets_disabled,
+            default_targets_disabled,
             targets,
             weight,
             disable_neg,
@@ -230,7 +232,8 @@ class Script(scripts.Script):
         self,
         p: StableDiffusionProcessing,
         enabled: bool,
-        embedded_targets_enabled: bool,
+        embedded_targets_disabled: bool,
+        default_targets_disabled: bool,
         targets_: str,
         weight: Union[float,int],
         disable_neg: bool,
@@ -268,21 +271,22 @@ class Script(scripts.Script):
         start_time = time.time()
 
         found_color_words = []
-        for color in unique_colors:
-            color_pattern = re.compile(re.escape(color), re.IGNORECASE | re.DOTALL)
-            for prompt in p.all_prompts:
-                matches = color_pattern.findall(prompt)
-                for matchingColorWord in matches:
-                    found_color_words.append(matchingColorWord)
+        if (not default_targets_disabled):
+            for color in unique_colors:
+                color_pattern = re.compile(re.escape(color), re.IGNORECASE | re.DOTALL)
+                for prompt in p.all_prompts:
+                    matches = color_pattern.findall(prompt)
+                    for matchingColorWord in matches:
+                        found_color_words.append(matchingColorWord)
 
         end_time = time.time()
 
         elapsed_time = end_time - start_time
-        log(f"Webui-cutoff-fork: Color word search time taken: {elapsed_time:.6f} seconds")
+        log(f"Webui-cutoff-fork: Default target search time taken: {elapsed_time:.6f} seconds")
 
         found_color_words = list(set(found_color_words))
 
-        if (embedded_targets_enabled):
+        if (not embedded_targets_disabled):
             targets = self.getTargetsFromPromptAndStripDelimiters(p)
         else:
             if targets_ is None or len(targets_) == 0:
